@@ -11,6 +11,9 @@
   - 2015-07-01  tuned boost logic
   - 2017-03-25  filter for sane temperature readings and jumps
   - 2018-03-11  use OneWire and CRC8 to validate sensor readings
+  - 2018-03-12  changed temp ints (100ths of C) to float
+                Use F() on strings to use PROGMEM rather than variable space.
+                (this should resolve the dynamic memory shortage issue)
 
   UDP interface:
   $ echo 'anything' | nc -w 1 -p 8888 -u 192.168.2.162 8888
@@ -42,14 +45,14 @@
 // presuming day time, uses h >= start && h < end
 #define BOOST_ON_A_START 14
 #define BOOST_ON_A_END   20
-#define BOOST_ON_A_TEMP  4200     // 42.00'C
+#define BOOST_ON_A_TEMP  42.00f     // 42.00'C
 
 // presuming night time, uses h >= start && h < end
 #define BOOST_ON_B_START  4
 #define BOOST_ON_B_END    7
-#define BOOST_ON_B_TEMP  4200     // 42.00'C
+#define BOOST_ON_B_TEMP  42.00f     // 42.00'C
 
-#define BOOST_OFF_TEMP   4600     // 46.00'C
+#define BOOST_OFF_TEMP   46.00f     // 46.00'C
 
 
 
@@ -166,11 +169,11 @@ EthernetUDP Udp;
 // ringbuf of 10 items for averaging
 #define SHW_RINGBUF_NUM_ITEMS 10
 byte shw_ringbuf_offset;
-// stored in centigrades * 100 (e.g. incl 2 decimals but without decimal point)
-int shw_collector_temp_ringbuf[SHW_RINGBUF_NUM_ITEMS],
-    shw_vat_temp_ringbuf[SHW_RINGBUF_NUM_ITEMS],
-    last_avg_shw_collector_temp = 0,
-    last_avg_shw_vat_temp = 0;
+// stored in degrees celcius (float)
+float shw_collector_temp_ringbuf[SHW_RINGBUF_NUM_ITEMS],
+      shw_vat_temp_ringbuf[SHW_RINGBUF_NUM_ITEMS],
+      last_avg_shw_collector_temp = 10.0f,
+      last_avg_shw_vat_temp = 20.0f;
 
 boolean shw_boost_state,
         last_shw_boost_state,
@@ -181,7 +184,7 @@ boolean shw_boost_state,
 // Water flow sensor
 // The hall-effect flow sensor outputs approximately
 // 5.5 pulses per second per litre/minute of flow.
-const float shw_hotwater_flowsensor_calibrationFactor = 5.5;
+const float shw_hotwater_flowsensor_calibrationFactor = 5.5f;
 
 // updated by interrupt handlers
 volatile unsigned int shw_hotwater_flowsensor_pulsecount;
@@ -212,11 +215,12 @@ void shw_boostpulse_interrupt_handler()
 }
 
 
+
 // ----------------------------------------
 // try and get sane temperature readings
 // returns 1 for success, 0 for fail
-// on success, *temp = centigrades * 100 (e.g. incl 2 decimals but without decimal point)
-int getSaneCurrentTemp (int pin, int *temp)
+// on success, *temp = degrees celsius
+int getSaneCurrentTemp (int pin, float *temp)
 {
   uint8_t data[9];
   OneWire ds(pin);
@@ -237,33 +241,32 @@ int getSaneCurrentTemp (int pin, int *temp)
 
     // calculate CRC8 over bytes 0-7, compare with byte 8 (transmitted CRC8)
     if (OneWire::crc8(data,8) != data[8])
-      Serial.println("Temp reading CRC error");
+      Serial.println(F("Temp reading CRC error"));
     else {
       // Convert the data to actual temperature
-      uint16_t TReading;
-      int tmp, sign;
+      int16_t raw = (data[1] << 8) | data[0];
+      float tmp;
 
-      TReading = (data[1] << 8) + data[0];
-      sign = (TReading & 0x8000);             // test most sig bit
-      if (sign)     // negative
-        TReading = (TReading ^ 0xffff) + 1;   // 2's comp
+      tmp = (float) raw / 16.0f;
 
-      tmp = (6 * TReading) + TReading / 4;  // multiply by (100 * 0.0625) or 6.25
-      if (sign)
-        tmp = -(tmp);
-
-      if (tmp > -500 && tmp < 10000) {      // between -5C and +100C
+      // sanity check - shouldn't be need because of CRC, yet it is!
+      // collector temp shouldn't drop below -5C
+      // vat temp shouldn't drop below 10C
+      // max temp on either shouldn't exceed 100C
+      if (((pin == SHW_COLLECTOR_TEMP_PIN && tmp > -5.0f) ||
+           (pin == SHW_VAT_TEMP_PIN && tmp > 10.0f)) &&
+          tmp < 100.0f) {
         *temp = tmp;
         return (1);   // succcess!
       }
 
-      Serial.println("Temp reading out of range");
+      Serial.println(F("Temp reading out of range"));
     }
 
     delay(500);   // waitawhile (1/2 sec)
   }
 
-  Serial.println("Temp read fail even after 5 tries");
+  Serial.println(F("Temp read fail even after 5 tries"));
   return (0);   // fail
 }
 
@@ -277,7 +280,7 @@ void setup()
   Serial.begin(9600);
 
   Serial.println();
-  Serial.println("HomeResourceMonitor - Arjen Lentz (C) 2014-2018");
+  Serial.println(F("HomeResourceMonitor - Arjen Lentz (C) 2014-2018"));
 
   // for the RTC
   Wire.begin();
@@ -291,7 +294,7 @@ void setup()
 
   // see if the card is present and can be initialized:
   if (!SD.begin(SPI_SD_CS_PIN)) {
-    Serial.println("SD card failed, or not present");
+    Serial.println(F("SD card failed, or not present"));
   }
 #endif
 
@@ -300,9 +303,9 @@ void setup()
   Ethernet.begin(mac, ip);
   Udp.begin(localPort);
 
-  Serial.print("IP addr=");
+  Serial.print(F("IP addr="));
   Serial.print(Ethernet.localIP());
-  Serial.print(":");
+  Serial.print(F(":"));
   Serial.println(localPort);
 
   pinMode(SHW_BOOST_RELAY_PIN, OUTPUT);
@@ -352,14 +355,14 @@ void loop()
 {
   // from RTC
   byte second, minute, hour, dayofweek, day, month, year;
-  // needs to be long to contain N * temp (from ringbuf) during avg calc
-  long avg_shw_collector_temp, avg_shw_vat_temp;
+  // might need double to contain N * temp (from ringbuf) during avg calc
+  double avg_shw_collector_temp, avg_shw_vat_temp;
   unsigned int shw_boostpulses;
 
   // ----------------------------------------
   if ((millis() - shw_hotwater_flowsensor_oldtime) > 1000) {   // Only process counters once per second
     Serial.println();
-    Serial.println("---");
+    Serial.println(F("---"));
 
     // ----------------------------------------
     // RTC
@@ -388,7 +391,7 @@ void loop()
         valid = true;
       }
       else
-         Serial.println("Invalid date/time read from RTC");
+         Serial.println(F("Invalid date/time read from RTC"));
     } while (!valid);
 
     date_str += Dec2s(year);
@@ -403,7 +406,7 @@ void loop()
     time_str += ':';
     time_str += Dec2s(second);
 
-    Serial.print("RTC  ");
+    Serial.print(F("RTC  "));
     Serial.print(date_str);
     Serial.print(' ');
     Serial.println(time_str);
@@ -411,35 +414,35 @@ void loop()
     // ----------------------------------------
     // SHW temp sensors
     {
-      int collector_temp, vat_temp;
+      float collector_temp, vat_temp;
 
-      Serial.print("SHW temp");
+      Serial.print(F("SHW temp"));
 
       // we split the printing here because the getSaneCurrentTemp function
       // might print an error, and we'd like to know which sensor it's about.
-      Serial.print("  collector=");
+      Serial.print(F("  collector="));
       collector_temp = last_avg_shw_collector_temp;
       if (getSaneCurrentTemp(SHW_COLLECTOR_TEMP_PIN,&collector_temp))
-        Serial.print((float) collector_temp / 100.0);
+        Serial.print(collector_temp);
 
-      Serial.print("  vat=");
+      Serial.print(F("  vat="));
       vat_temp = last_avg_shw_vat_temp;
       if (getSaneCurrentTemp(SHW_VAT_TEMP_PIN,&vat_temp))
-        Serial.print((float) vat_temp / 100.0);
+        Serial.print(vat_temp);
 
       // try to sanitise wildly fluctuating readings
       // we even things out by not moving more than 1 degree from last avg
       // so if the reading was in fact correct, it'll get there after a while
       // (completely ignoring readings could create deadlocks or other grief)
-      if ((collector_temp - last_avg_shw_collector_temp) > 100)
-        collector_temp = last_avg_shw_collector_temp + 100;
-      else if ((collector_temp - last_avg_shw_collector_temp) < -100)
-        collector_temp = last_avg_shw_collector_temp - 100;
+      if ((collector_temp - last_avg_shw_collector_temp) > 1.0f)
+        collector_temp = last_avg_shw_collector_temp + 1.0f;
+      else if ((collector_temp - last_avg_shw_collector_temp) < -1.0f)
+        collector_temp = last_avg_shw_collector_temp - 1.0f;
 
-      if ((vat_temp - last_avg_shw_vat_temp) > 100)
-        vat_temp = last_avg_shw_vat_temp + 100;
-      else if ((vat_temp - last_avg_shw_vat_temp) < -100)
-        vat_temp = last_avg_shw_vat_temp - 100;
+      if ((vat_temp - last_avg_shw_vat_temp) > 1.0f)
+        vat_temp = last_avg_shw_vat_temp + 1.0f;
+      else if ((vat_temp - last_avg_shw_vat_temp) < -1.0f)
+        vat_temp = last_avg_shw_vat_temp - 1.0f;
 
       // we use the average over the last SHW_RINGBUF_NUM_ITEMS measurements
       // the sensor readings fluctuate slightly so otherwise we get too much noise
@@ -448,7 +451,7 @@ void loop()
       shw_ringbuf_offset++;
       shw_ringbuf_offset %= SHW_RINGBUF_NUM_ITEMS;
 
-      avg_shw_collector_temp = avg_shw_vat_temp = 0L;
+      avg_shw_collector_temp = avg_shw_vat_temp = 0.0f;
       for (int i = 0; i < SHW_RINGBUF_NUM_ITEMS; i++) {
         avg_shw_collector_temp += shw_collector_temp_ringbuf[i];
         avg_shw_vat_temp       += shw_vat_temp_ringbuf[i];
@@ -469,10 +472,10 @@ void loop()
 
       if (shw_boost_state != last_shw_boost_state)
         digitalWrite(SHW_BOOST_RELAY_PIN, shw_boost_state ? HIGH : LOW);
-      Serial.print("  boost=");
+      Serial.print(F("  boost="));
       Serial.print(shw_boost_state);
 
-      Serial.print("  override=");
+      Serial.print(F("  override="));
       Serial.print(shw_boost_override);
 
 
@@ -485,13 +488,15 @@ void loop()
       // Enable the interrupt again now that we've finished sending output
       attachInterrupt(SHW_BOOSTPULSE_INTERRUPT, shw_boostpulse_interrupt_handler, FALLING);
 
-      Serial.print("  whpulses=");
+      Serial.print(F("  whpulses="));
       Serial.println(shw_boostpulses);
 
 
+      // check if anything has changed
+      // can't check temp directly as they're floats, so we use a delta of 0.25 degree
       if (firsttime ||
-          avg_shw_collector_temp != last_avg_shw_collector_temp ||
-          avg_shw_vat_temp != last_avg_shw_vat_temp ||
+          abs(avg_shw_collector_temp - last_avg_shw_collector_temp) > 0.25f ||
+          abs(avg_shw_vat_temp - last_avg_shw_vat_temp) > 0.25f ||
           shw_boost_state != last_shw_boost_state ||
           shw_boostpulses) {
         String shw_temp_str;
@@ -502,9 +507,9 @@ void loop()
         shw_temp_str += "\",\"";
         shw_temp_str += time_str;
         shw_temp_str += "\",";
-        shw_temp_str += (float) avg_shw_collector_temp / 100.0;
+        shw_temp_str += avg_shw_collector_temp;
         shw_temp_str += ',';
-        shw_temp_str += (float) avg_shw_vat_temp / 100.0;
+        shw_temp_str += avg_shw_vat_temp;
         shw_temp_str += ',';
         shw_temp_str += shw_boost_override ? '2' : (shw_boost_state ? '1' : '0');
         shw_temp_str += ',';
@@ -520,27 +525,27 @@ void loop()
           dataFile.close();
         }
         else
-          Serial.println("! Can't write to SD file SHW_TEMP.CSV");
+          Serial.println(F("! Can't write to SD file SHW_TEMP.CSV"));
 #endif
 
         // UDP
         if (haveremoteudp) {
           Udp.beginPacket(remoteIP, remotePort);
-          Udp.write("SHW_TEMP,");
+          Udp.write(F("SHW_TEMP,"));
           Udp.write(str);
-          Udp.write("\n");
+          Udp.write(F("\n"));
           Udp.endPacket();
         }
 
-        last_avg_shw_collector_temp = (int) avg_shw_collector_temp;
-        last_avg_shw_vat_temp = (int) avg_shw_vat_temp;
+        last_avg_shw_collector_temp = (float) avg_shw_collector_temp;
+        last_avg_shw_vat_temp = (float) avg_shw_vat_temp;
         last_shw_boost_state = shw_boost_state;
       }
     }
 
     // ----------------------------------------
     // flow sensor(s)
-    Serial.print("SHW hotwater");
+    Serial.print(F("SHW hotwater"));
 
     // Disable the interrupt while calculating flow rate
     detachInterrupt(SHW_HOTWATER_INTERRUPT);
@@ -571,7 +576,7 @@ void loop()
     // During testing it can be useful to output the literal pulse count value so you
     // can compare that and the calculated flow rate against the data sheets for the
     // flow sensor. Uncomment the following two lines to display the count value.
-    Serial.print("  pulsecount=");
+    Serial.print(F("  pulsecount="));
     Serial.print(shw_hotwater_flowsensor_pulsecount);
 
     // Reset the pulse counter so we can start incrementing again
@@ -581,15 +586,15 @@ void loop()
     attachInterrupt(SHW_HOTWATER_INTERRUPT, shw_hotwater_interrupt_handler, FALLING);
 
     // Print the flow rate for this second in litres / minute
-    Serial.print("  flowrate=");
+    Serial.print(F("  flowrate="));
     Serial.print(shw_hotwater_flowsensor_flow_rate, 3);
 
     // Print the number of millilitres flowed in this second
-    Serial.print("  flowml=");             // Output separator
+    Serial.print(F("  flowml="));             // Output separator
     Serial.print(shw_hotwater_flowsensor_flow_ml);
 
     // Print the cumulative total of millilitres flowed since starting
-    Serial.print("  totalml=");             // Output separator
+    Serial.print(F("  totalml="));             // Output separator
     Serial.println(shw_hotwater_flowsensor_total_ml);
 
     if (firsttime || shw_hotwater_flowsensor_flow_rate > 0) {
@@ -617,15 +622,15 @@ void loop()
         dataFile.close();
       }
       else
-        Serial.println("! Can't write to SD file SHW_FLOW.CSV");
+        Serial.println(F("! Can't write to SD file SHW_FLOW.CSV"));
 #endif
 
       // UDP
       if (haveremoteudp) {
         Udp.beginPacket(remoteIP, remotePort);
-        Udp.write("SHW_FLOW,");
+        Udp.write(F("SHW_FLOW,"));
         Udp.write(str);
-        Udp.write("\n");
+        Udp.write(F("\n"));
         Udp.endPacket();
       }
     }
@@ -649,9 +654,9 @@ void loop()
   int packetSize = Udp.parsePacket();
 
   if (packetSize) {
-    Serial.print("Rcvd pkt len=");
+    Serial.print(F("Rcvd pkt len="));
     Serial.print(packetSize);
-    Serial.print(" from ");
+    Serial.print(F(" from "));
 
     remoteIP = Udp.remoteIP();
     remotePort = Udp.remotePort();
@@ -671,7 +676,7 @@ void loop()
       // read the packet into packetBufffer
       Udp.read(packetBuffer, UDP_TX_PACKET_MAX_SIZE);
       packetBuffer[packetSize] = '\0';
-      Serial.print("Pkt=");
+      Serial.print(F("Pkt="));
       Serial.println(packetBuffer);
 
       firsttime = true;
@@ -679,11 +684,11 @@ void loop()
       // remote control of boost
       if (!strcmp(packetBuffer, "BOOST_ON")) {
         shw_boost_override = true;
-        Serial.println("BOOST_ON");
+        Serial.println(F("BOOST_ON"));
       }
       else if (!strcmp(packetBuffer, "BOOST_OFF")) {
         shw_boost_override = shw_boost_state = false;
-        Serial.println("BOOST_OFF");
+        Serial.println(F("BOOST_OFF"));
       }
     }
   }
